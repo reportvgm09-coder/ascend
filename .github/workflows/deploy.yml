@@ -1,0 +1,51 @@
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # Override with a repository variable FLY_APP_NAME if this name is taken on Fly.io.
+      APP: ${{ vars.FLY_APP_NAME || format('ascend-{0}', github.repository_owner) }}
+      REGION: ${{ vars.FLY_REGION || 'sin' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Check required secrets
+        env:
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+        run: |
+          [ -n "$FLY_API_TOKEN" ] || { echo "::error::Add the FLY_API_TOKEN repository secret"; exit 1; }
+          [ -n "$APP_PASSWORD" ] || { echo "::error::Add the APP_PASSWORD repository secret"; exit 1; }
+
+      - name: Create app and volume (first run only)
+        run: |
+          APP=$(echo "$APP" | tr '[:upper:]' '[:lower:]')
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          flyctl status -a "$APP" >/dev/null 2>&1 || flyctl apps create "$APP"
+          if ! flyctl volumes list -a "$APP" | grep -q ascend_data; then
+            flyctl volumes create ascend_data --size 1 --region "$REGION" -a "$APP" --yes
+          fi
+
+      - name: Set app secrets
+        env:
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          args=("APP_PASSWORD=$APP_PASSWORD")
+          [ -n "$ANTHROPIC_API_KEY" ] && args+=("ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+          flyctl secrets set "${args[@]}" --stage -a "$APP"
+
+      - name: Deploy
+        run: flyctl deploy --remote-only -a "$APP" --primary-region "$REGION" --ha=false
+
+      - name: Show URL
+        run: echo "::notice::Live at https://$APP.fly.dev"

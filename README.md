@@ -43,6 +43,18 @@ Required environment variables:
 
 ### Fly.io (recommended: cheap, with volumes)
 
+**Automatic (GitHub Actions):** every push to `main` deploys via `.github/workflows/deploy.yml`.
+1. Create a Fly.io account, then create a deploy token: Fly dashboard → **Tokens** → create an org token (or run `fly tokens create org`).
+2. In your GitHub repo → **Settings → Secrets and variables → Actions**, add these secrets:
+   - `FLY_API_TOKEN`: the Fly token
+   - `APP_PASSWORD`: your login password
+   - `ANTHROPIC_API_KEY`: optional, enables the AI coach
+3. **Actions → Deploy to Fly.io → Run workflow.** The first run creates the app and a 1 GB volume, then deploys. Your app goes live at `https://ascend-<your-github-name>.fly.dev`.
+
+Optional repository *variables*: `FLY_APP_NAME` (if the default name is taken) and `FLY_REGION` (default `sin`).
+
+**Manual (Fly CLI):**
+
 ```bash
 fly launch --no-deploy          # accept the existing fly.toml, pick a unique app name
 fly volumes create ascend_data --size 1
