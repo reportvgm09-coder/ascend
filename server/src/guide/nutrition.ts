@@ -1,4 +1,4 @@
-import { db } from "../db.js";
+import { get } from "../db.js";
 import { MEAL_IDEAS } from "./content.js";
 import { getProfile, latestWeight, type Profile } from "./profile.js";
 
@@ -22,8 +22,9 @@ export interface NutritionTargets {
 }
 
 /** Mifflin-St Jeor BMR -> TDEE -> goal-adjusted calories and macros. */
-export function computeTargets(profile = getProfile()): NutritionTargets | null {
-  const weight = latestWeight();
+export async function computeTargets(profile?: Profile): Promise<NutritionTargets | null> {
+  profile ??= await getProfile();
+  const weight = await latestWeight();
   if (!weight || !profile.height_cm || !profile.birth_year) return null;
   const age = new Date().getFullYear() - profile.birth_year;
   const bmr = Math.round(
@@ -53,21 +54,20 @@ export function computeTargets(profile = getProfile()): NutritionTargets | null 
   return { bmr, tdee, calories, protein, carbs, fat, water_ml, explanation };
 }
 
-export function dayTotals(date: string) {
-  const t = db
-    .prepare(
-      `SELECT COALESCE(SUM(calories),0) calories, COALESCE(SUM(protein),0) protein,
-              COALESCE(SUM(carbs),0) carbs, COALESCE(SUM(fat),0) fat, COUNT(*) meals
-       FROM meals WHERE date = ?`,
-    )
-    .get(date) as { calories: number; protein: number; carbs: number; fat: number; meals: number };
-  const water = db.prepare("SELECT COALESCE(SUM(ml),0) ml FROM water_logs WHERE date = ?").get(date) as { ml: number };
+export async function dayTotals(date: string) {
+  const t = (await get<{ calories: number; protein: number; carbs: number; fat: number; meals: number }>(
+    `SELECT COALESCE(SUM(calories),0) calories, COALESCE(SUM(protein),0) protein,
+            COALESCE(SUM(carbs),0) carbs, COALESCE(SUM(fat),0) fat, COUNT(*) meals
+     FROM meals WHERE date = ?`,
+    [date],
+  ))!;
+  const water = (await get<{ ml: number }>("SELECT COALESCE(SUM(ml),0) ml FROM water_logs WHERE date = ?", [date]))!;
   return { ...t, water_ml: water.ml };
 }
 
 /** Score 0-100 for one day: half for hitting calories (±10%), half for protein. */
-export function dayNutritionScore(date: string, targets: NutritionTargets | null): number {
-  const t = dayTotals(date);
+export async function dayNutritionScore(date: string, targets: NutritionTargets | null): Promise<number> {
+  const t = await dayTotals(date);
   if (!targets || t.meals === 0) return 0;
   const calDiff = Math.abs(t.calories - targets.calories) / targets.calories;
   const calScore = calDiff <= 0.1 ? 1 : Math.max(0, 1 - (calDiff - 0.1) * 3);

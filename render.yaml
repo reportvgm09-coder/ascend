@@ -1,18 +1,29 @@
-# Render Blueprint. Persistent disks require a paid instance (Starter or above).
+# Render Blueprint: free web service. Data lives in a free Turso database
+# because Render's free instances have no persistent disk.
 services:
   - type: web
     name: ascend
-    runtime: docker
-    plan: starter
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci --prefix server --include=dev && npm ci --prefix client --include=dev && npm run build
+    startCommand: npm --prefix server start
     healthCheckPath: /api/health
+    autoDeploy: true
     envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: REQUIRE_REMOTE_DB
+        value: "1"
+      - key: JWT_SECRET
+        generateValue: true
       - key: APP_PASSWORD
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
-      - key: JWT_SECRET
-        generateValue: true
-    disk:
-      name: ascend-data
-      mountPath: /data
-      sizeGB: 1

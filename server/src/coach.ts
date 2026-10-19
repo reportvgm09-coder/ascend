@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { Router } from "express";
-import { db } from "./db.js";
+import { all, run } from "./db.js";
 import { todayBriefing, weeklyReview } from "./guide/briefing.js";
 import { addDays, isDate, serverToday } from "./guide/dates.js";
 import { goalInsights, learningStats } from "./guide/growth.js";
@@ -21,19 +21,17 @@ How to coach:
 - For injuries, pain, eating disorders, medical conditions or persistent low mood, give general safe guidance and clearly recommend seeing a qualified professional. If they mention self-harm or suicidal thoughts, respond with care, encourage them to contact local emergency services or a crisis line right away, and to reach out to someone they trust.
 - Don't invent data you don't have. If something isn't logged, say so and suggest logging it.`;
 
-function snapshot(today: string): string {
-  const profile = getProfile();
-  const brief = todayBriefing(today);
-  const weekly = weeklyReview(today);
-  const workouts = db
-    .prepare(
+async function snapshot(today: string): Promise<string> {
+  const [profile, brief, weekly, progression, goals, learning] = await Promise.all([
+    getProfile(), todayBriefing(today), weeklyReview(today), progressionAdvice(today), goalInsights(today), learningStats(today),
+  ]);
+  const workouts = await all(
       `SELECT w.date, w.name, GROUP_CONCAT(e.name || ' ' || COALESCE(s.weight || 'kg×', '') || COALESCE(s.reps, s.minutes || 'min'), '; ') sets
        FROM workouts w LEFT JOIN workout_sets s ON s.workout_id = w.id LEFT JOIN exercises e ON e.id = s.exercise_id
        WHERE w.date > ? GROUP BY w.id ORDER BY w.date DESC LIMIT 10`,
-    )
-    .all(addDays(today, -14));
-  const journal = db.prepare("SELECT date, mood, energy, wins, substr(entry, 1, 300) entry FROM journal WHERE date > ? ORDER BY date DESC LIMIT 5").all(addDays(today, -7));
-  const learning = learningStats(today);
+    [addDays(today, -14)],
+  );
+  const journal = await all("SELECT date, mood, energy, wins, substr(entry, 1, 300) entry FROM journal WHERE date > ? ORDER BY date DESC LIMIT 5", [addDays(today, -7)]);
 
   return JSON.stringify({
     today,
@@ -43,9 +41,9 @@ function snapshot(today: string): string {
     nutrition_today: brief.nutrition.totals,
     next_workout: brief.nextWorkout,
     recent_workouts: workouts,
-    progression_advice: progressionAdvice(today).slice(0, 6),
+    progression_advice: progression.slice(0, 6),
     habits: brief.habits.map(({ name, streak, week_count, target_per_week, done_today }) => ({ name, streak, week_count, target_per_week, done_today })),
-    goals: goalInsights(today).map(({ title, area, progress, expected, daysLeft, behind, why }) => ({ title, area, progress, expected, daysLeft, behind, why })),
+    goals: goals.map(({ title, area, progress, expected, daysLeft, behind, why }) => ({ title, area, progress, expected, daysLeft, behind, why })),
     recent_journal: journal,
     learning_active: learning.active,
     learning_minutes_7d: learning.minutes7,
@@ -60,12 +58,12 @@ coachRouter.get("/status", (_req, res) => {
   res.json({ enabled: Boolean(process.env.ANTHROPIC_API_KEY), model: MODEL });
 });
 
-coachRouter.get("/messages", (_req, res) => {
-  res.json(db.prepare("SELECT * FROM coach_messages ORDER BY id DESC LIMIT 100").all().reverse());
+coachRouter.get("/messages", async (_req, res) => {
+  res.json((await all("SELECT * FROM coach_messages ORDER BY id DESC LIMIT 100")).reverse());
 });
 
-coachRouter.delete("/messages", (_req, res) => {
-  db.prepare("DELETE FROM coach_messages").run();
+coachRouter.delete("/messages", async (_req, res) => {
+  await run("DELETE FROM coach_messages");
   res.json({ ok: true });
 });
 
@@ -78,18 +76,18 @@ coachRouter.post("/chat", async (req, res) => {
   const today = isDate(req.body?.date) ? req.body.date : serverToday();
 
   const history = (
-    db.prepare("SELECT role, content FROM coach_messages ORDER BY id DESC LIMIT ?").all(HISTORY_LIMIT) as { role: "user" | "assistant"; content: string }[]
+    await all<{ role: "user" | "assistant"; content: string }>("SELECT role, content FROM coach_messages ORDER BY id DESC LIMIT ?", [HISTORY_LIMIT])
   ).reverse();
   // The API requires the conversation to start with a user turn.
   while (history.length && history[0].role !== "user") history.shift();
-  db.prepare("INSERT INTO coach_messages (role, content) VALUES ('user', ?)").run(message);
+  await run("INSERT INTO coach_messages (role, content) VALUES ('user', ?)", [message]);
 
   // The data snapshot goes after the newest user message, so the cached prefix
   // (system prompt + earlier turns) stays byte-identical between requests.
   const messages: Anthropic.Beta.BetaMessageParam[] = [
     ...history,
     { role: "user", content: message },
-    { role: "system", content: `User data snapshot (JSON):\n${snapshot(today)}` },
+    { role: "system", content: `User data snapshot (JSON):\n${await snapshot(today)}` },
   ];
 
   res.setHeader("Content-Type", "text/event-stream");
@@ -124,7 +122,7 @@ coachRouter.post("/chat", async (req, res) => {
       text += note;
       send({ type: "text", text: note });
     }
-    if (text) db.prepare("INSERT INTO coach_messages (role, content) VALUES ('assistant', ?)").run(text);
+    if (text) await run("INSERT INTO coach_messages (role, content) VALUES ('assistant', ?)", [text]);
     send({ type: "done" });
   } catch (err) {
     let msg = "The coach is unavailable right now. Please try again.";
@@ -135,7 +133,7 @@ coachRouter.post("/chat", async (req, res) => {
       console.error("coach error", err);
       send({ type: "error", error: msg });
     }
-    if (text) db.prepare("INSERT INTO coach_messages (role, content) VALUES ('assistant', ?)").run(text);
+    if (text) await run("INSERT INTO coach_messages (role, content) VALUES ('assistant', ?)", [text]);
   }
   res.end();
 });

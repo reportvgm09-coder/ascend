@@ -1,4 +1,4 @@
-import { db } from "../db.js";
+import { get } from "../db.js";
 import { addDays } from "./dates.js";
 import {
   challengeCount, dailyChallenges, dailyLesson, focusMinutes, goalInsights,
@@ -18,38 +18,59 @@ export interface Recommendation {
 
 const pct = (x: number) => Math.max(0, Math.min(100, Math.round(x)));
 
-export function areaScores(today: string) {
-  const profile = getProfile();
+export async function areaScores(today: string) {
+  const profile = await getProfile();
   const from = addDays(today, -6);
-  const targets = computeTargets(profile);
+  const targets = await computeTargets(profile);
   const days = Array.from({ length: 7 }, (_, i) => addDays(from, i));
-  const mood = moodStats(today);
+  const [workouts, nutritionDays, habits, focus, mood, learning, confidence] = await Promise.all([
+    workoutDates(from, today),
+    Promise.all(days.map((d) => dayNutritionScore(d, targets))),
+    habitStatuses(today),
+    focusMinutes(from, today),
+    moodStats(today),
+    learningStats(today),
+    challengeCount(from, today, "confidence"),
+  ]);
   return {
-    fitness: pct((workoutDates(from, today).length / Math.max(1, profile.training_days)) * 100),
-    nutrition: pct(days.reduce((s, d) => s + dayNutritionScore(d, targets), 0) / 7),
-    discipline: pct(habitScore(habitStatuses(today)) * 0.7 + Math.min(1, focusMinutes(from, today) / 300) * 30),
+    fitness: pct((workouts.length / Math.max(1, profile.training_days)) * 100),
+    nutrition: pct(nutritionDays.reduce((s, v) => s + v, 0) / 7),
+    discipline: pct(habitScore(habits) * 0.7 + Math.min(1, focus / 300) * 30),
     mindset: pct((mood.journalDays7 / 7) * 70 + (mood.mood7 ? ((mood.mood7 - 1) / 4) * 30 : 0)),
-    knowledge: pct((learningStats(today).minutes7 / 150) * 100),
-    confidence: pct((challengeCount(from, today, "confidence") / 4) * 100),
+    knowledge: pct((learning.minutes7 / 150) * 100),
+    confidence: pct((confidence / 4) * 100),
   };
 }
 
-export function todayBriefing(today: string) {
-  const profile = getProfile();
+export async function todayBriefing(today: string) {
+  const profile = await getProfile();
   const recs: Recommendation[] = [];
-  const targets = computeTargets(profile);
-  const totals = dayTotals(today);
+  const program = await recommendedProgram();
+  const [targets, totals, complete, next, recent, lastWorkout, balance, progression, habits, focusToday, goals, mood, learning, scores, challenges] =
+    await Promise.all([
+      computeTargets(profile),
+      dayTotals(today),
+      isProfileComplete(profile),
+      nextProgramDay(program),
+      workoutDates(addDays(today, -6), today),
+      get<{ d: string | null }>("SELECT MAX(date) d FROM workouts WHERE date <= ?", [today]).then((r) => r?.d ?? null),
+      muscleBalance(today),
+      progressionAdvice(today),
+      habitStatuses(today),
+      focusMinutes(today, today),
+      goalInsights(today),
+      moodStats(today),
+      learningStats(today),
+      areaScores(today),
+      dailyChallenges(today),
+    ]);
 
-  if (!isProfileComplete(profile)) {
+  if (!complete) {
     recs.push({ area: "setup", priority: 1, title: "Complete your profile", detail: "Add your age, height and weight so I can calculate your calorie and protein targets and pick a training program for you.", link: "/settings" });
   }
 
   // --- Fitness
-  const program = recommendedProgram();
-  const next = nextProgramDay(program);
-  const recent = workoutDates(addDays(today, -6), today);
   const trainedToday = recent.includes(today);
-  const lastWorkout = (db.prepare("SELECT MAX(date) d FROM workouts WHERE date <= ?").get(today) as { d: string | null }).d;
   if (!trainedToday) {
     const remaining = profile.training_days - recent.length;
     if (remaining > 0) {
@@ -65,13 +86,14 @@ export function todayBriefing(today: string) {
     }
   }
   if (recent.length >= 2) {
-    const neglected = muscleBalance(today).filter((m) => m.sets === 0).map((m) => m.muscle);
+    const neglected = balance.filter((m) => m.sets === 0).map((m) => m.muscle);
     if (neglected.length && neglected.length < 6) {
       recs.push({ area: "fitness", priority: 3, title: "Balance your training", detail: `No sets for ${neglected.join(", ")} in the last 7 days. Add at least 6 sets for each.`, link: "/fitness" });
     }
   }
-  const ready = progressionAdvice(today).filter((a) => a.action === "increase").slice(0, 2);
-  for (const a of ready) recs.push({ area: "fitness", priority: 3, title: `Level up: ${a.exercise}`, detail: a.detail, link: "/fitness" });
+  for (const a of progression.filter((a) => a.action === "increase").slice(0, 2)) {
+    recs.push({ area: "fitness", priority: 3, title: `Level up: ${a.exercise}`, detail: a.detail, link: "/fitness" });
+  }
 
   // --- Nutrition
   if (targets) {
@@ -90,25 +112,23 @@ export function todayBriefing(today: string) {
   }
 
   // --- Habits & discipline
-  const habits = habitStatuses(today);
   for (const h of habits.filter((h) => !h.done_today && h.streak >= 3)) {
     recs.push({ area: "discipline", priority: 1, title: `Protect your ${h.streak}-day streak: ${h.name}`, detail: h.cue ? `Your cue: ${h.cue}.` : "Do even a tiny version of it today. Never miss twice.", link: "/goals" });
   }
   if (!habits.length) {
     recs.push({ area: "discipline", priority: 2, title: "Create your first habit", detail: "Start small: a habit that takes under 2 minutes (e.g. \"read 1 page\", \"10 push-ups\"). Attach it to a cue: \"After I brush my teeth, I will…\"", link: "/goals" });
   }
-  if (focusMinutes(today, today) === 0) {
+  if (focusToday === 0) {
     recs.push({ area: "discipline", priority: 3, title: "One deep-work block", detail: "Do 25 focused minutes on your most important task, with your phone in another room.", link: "/mind" });
   }
 
   // --- Goals
-  for (const g of goalInsights(today)) {
+  for (const g of goals) {
     if (g.behind) recs.push({ area: "discipline", priority: 2, title: `Behind on: ${g.title}`, detail: `${g.progress}% done, but ${g.expected}% of the time has passed. What's the smallest next step you can take today?`, link: "/goals" });
     else if (g.daysLeft !== null && g.daysLeft >= 0 && g.daysLeft <= 7) recs.push({ area: "discipline", priority: 2, title: `Deadline in ${g.daysLeft} days: ${g.title}`, detail: `${g.progress}% complete. Plan the final push.`, link: "/goals" });
   }
 
   // --- Mindset
-  const mood = moodStats(today);
   if (mood.mood3 !== null && mood.mood3 <= 2.5) {
     recs.push({ area: "mindset", priority: 1, title: "Your mood has been low", detail: "Be gentle with yourself. Try 4 rounds of box breathing, a walk outside, and talking to someone you trust. If it lasts more than two weeks, please consider speaking to a professional. That's a sign of strength.", link: "/mind" });
   }
@@ -117,7 +137,6 @@ export function todayBriefing(today: string) {
   }
 
   // --- Learning
-  const learning = learningStats(today);
   if (!learning.active.length) {
     recs.push({ area: "knowledge", priority: 3, title: "Pick something to learn", detail: "Add a book, course or skill you're actively working on. 20 minutes a day adds up to 120+ hours a year.", link: "/learn" });
   } else if (learning.stale.length) {
@@ -126,9 +145,9 @@ export function todayBriefing(today: string) {
 
   return {
     profileName: profile.name,
-    scores: areaScores(today),
+    scores,
     recommendations: recs.sort((a, b) => a.priority - b.priority),
-    challenges: dailyChallenges(today),
+    challenges,
     lesson: dailyLesson(today),
     nutrition: { targets, totals },
     habits,
@@ -136,35 +155,41 @@ export function todayBriefing(today: string) {
   };
 }
 
-export function weeklyReview(today: string) {
+type Num = { v: number | null };
+
+export async function weeklyReview(today: string) {
   const range = (end: string) => ({ from: addDays(end, -6), to: end });
-  const stats = (r: { from: string; to: string }) => {
-    const cal = db.prepare("SELECT AVG(c) v FROM (SELECT SUM(calories) c FROM meals WHERE date BETWEEN ? AND ? GROUP BY date)").get(r.from, r.to) as { v: number | null };
-    const protein = db.prepare("SELECT AVG(p) v FROM (SELECT SUM(protein) p FROM meals WHERE date BETWEEN ? AND ? GROUP BY date)").get(r.from, r.to) as { v: number | null };
-    const mood = db.prepare("SELECT AVG(mood) v, COUNT(DISTINCT date) n FROM journal WHERE date BETWEEN ? AND ?").get(r.from, r.to) as { v: number | null; n: number };
-    const learn = db.prepare("SELECT COALESCE(SUM(minutes),0) v FROM practice_logs WHERE date BETWEEN ? AND ?").get(r.from, r.to) as { v: number };
-    const habitsDone = db.prepare("SELECT COUNT(*) v FROM habit_logs WHERE date BETWEEN ? AND ?").get(r.from, r.to) as { v: number };
-    const weight = db.prepare("SELECT AVG(weight_kg) v FROM body_metrics WHERE date BETWEEN ? AND ?").get(r.from, r.to) as { v: number | null };
+  const stats = async (r: { from: string; to: string }) => {
+    const args = [r.from, r.to];
+    const [cal, protein, mood, learn, habitsDone, weight, workouts, focus, challenges] = await Promise.all([
+      get<Num>("SELECT AVG(c) v FROM (SELECT SUM(calories) c FROM meals WHERE date BETWEEN ? AND ? GROUP BY date)", args),
+      get<Num>("SELECT AVG(p) v FROM (SELECT SUM(protein) p FROM meals WHERE date BETWEEN ? AND ? GROUP BY date)", args),
+      get<{ v: number | null; n: number }>("SELECT AVG(mood) v, COUNT(DISTINCT date) n FROM journal WHERE date BETWEEN ? AND ?", args),
+      get<{ v: number }>("SELECT COALESCE(SUM(minutes),0) v FROM practice_logs WHERE date BETWEEN ? AND ?", args),
+      get<{ v: number }>("SELECT COUNT(*) v FROM habit_logs WHERE date BETWEEN ? AND ?", args),
+      get<Num>("SELECT AVG(weight_kg) v FROM body_metrics WHERE date BETWEEN ? AND ?", args),
+      workoutDates(r.from, r.to),
+      focusMinutes(r.from, r.to),
+      challengeCount(r.from, r.to),
+    ]);
     return {
-      workouts: workoutDates(r.from, r.to).length,
-      avgCalories: cal.v ? Math.round(cal.v) : null,
-      avgProtein: protein.v ? Math.round(protein.v) : null,
-      habitChecks: habitsDone.v,
-      journalDays: mood.n,
-      avgMood: mood.v ? Math.round(mood.v * 10) / 10 : null,
-      learningMinutes: learn.v,
-      focusMinutes: focusMinutes(r.from, r.to),
-      challenges: challengeCount(r.from, r.to),
-      avgWeight: weight.v ? Math.round(weight.v * 10) / 10 : null,
+      workouts: workouts.length,
+      avgCalories: cal?.v ? Math.round(cal.v) : null,
+      avgProtein: protein?.v ? Math.round(protein.v) : null,
+      habitChecks: habitsDone!.v,
+      journalDays: mood!.n,
+      avgMood: mood?.v ? Math.round(mood.v * 10) / 10 : null,
+      learningMinutes: learn!.v,
+      focusMinutes: focus,
+      challenges,
+      avgWeight: weight?.v ? Math.round(weight.v * 10) / 10 : null,
     };
   };
-  const thisWeek = stats(range(today));
-  const lastWeek = stats(range(addDays(today, -7)));
+  const [thisWeek, lastWeek, profile] = await Promise.all([stats(range(today)), stats(range(addDays(today, -7))), getProfile()]);
 
   const wins: string[] = [];
   const focus: string[] = [];
   const better = (k: keyof typeof thisWeek) => (thisWeek[k] ?? 0) > (lastWeek[k] ?? 0);
-  const profile = getProfile();
 
   if (thisWeek.workouts >= profile.training_days) wins.push(`Hit your training target: ${thisWeek.workouts} sessions.`);
   else focus.push(`Training: ${thisWeek.workouts}/${profile.training_days} sessions. Put your workouts in your calendar like meetings.`);
@@ -175,7 +200,7 @@ export function weeklyReview(today: string) {
   else focus.push("Mindset: journal at least 5 days. Try right after dinner.");
   if (thisWeek.challenges >= 4) wins.push(`Completed ${thisWeek.challenges} growth challenges.`);
   else focus.push("Personality: take on at least 4 daily challenges this week. Growth happens just outside your comfort zone.");
-  const targets = computeTargets(profile);
+  const targets = await computeTargets(profile);
   if (targets && thisWeek.avgProtein !== null) {
     if (thisWeek.avgProtein >= targets.protein * 0.9) wins.push(`Protein on point (avg ${thisWeek.avgProtein} g).`);
     else focus.push(`Nutrition: average protein was ${thisWeek.avgProtein} g (target ${targets.protein} g). Add one protein source to every meal.`);

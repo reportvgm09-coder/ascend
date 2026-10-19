@@ -1,4 +1,4 @@
-import { db } from "../db.js";
+import { all, get } from "../db.js";
 import { CHALLENGES, LESSONS, type Challenge } from "./content.js";
 import { addDays, daysBetween } from "./dates.js";
 
@@ -14,13 +14,16 @@ export interface HabitStatus {
   last7: boolean[];
 }
 
-export function habitStatuses(today: string): HabitStatus[] {
-  const habits = db.prepare("SELECT * FROM habits WHERE archived = 0 ORDER BY id").all() as {
-    id: number; name: string; area: string; cue: string; target_per_week: number;
-  }[];
-  const logStmt = db.prepare("SELECT date FROM habit_logs WHERE habit_id = ? AND date <= ? ORDER BY date DESC LIMIT 400");
+export async function habitStatuses(today: string): Promise<HabitStatus[]> {
+  const habits = await all<{ id: number; name: string; area: string; cue: string; target_per_week: number }>(
+    "SELECT * FROM habits WHERE archived = 0 ORDER BY id",
+  );
+  const logs = await all<{ habit_id: number; date: string }>(
+    "SELECT habit_id, date FROM habit_logs WHERE date > ? AND date <= ?",
+    [addDays(today, -400), today],
+  );
   return habits.map((h) => {
-    const dates = new Set((logStmt.all(h.id, today) as { date: string }[]).map((r) => r.date));
+    const dates = new Set(logs.filter((l) => l.habit_id === h.id).map((l) => l.date));
     const done_today = dates.has(today);
     // A streak survives until the end of today, so start counting from yesterday if today isn't done yet.
     let streak = 0;
@@ -43,8 +46,8 @@ export interface GoalRow {
   deadline: string | null; status: string; created_at: string;
 }
 
-export function goalInsights(today: string) {
-  const goals = db.prepare("SELECT * FROM goals WHERE status = 'active'").all() as GoalRow[];
+export async function goalInsights(today: string) {
+  const goals = await all<GoalRow>("SELECT * FROM goals WHERE status = 'active'");
   return goals.map((g) => {
     const span = g.target_value - g.start_value;
     const progress = span === 0 ? 1 : Math.max(0, Math.min(1, (g.current_value - g.start_value) / span));
@@ -60,10 +63,11 @@ export function goalInsights(today: string) {
   });
 }
 
-export function moodStats(today: string) {
-  const rows = db
-    .prepare("SELECT date, AVG(mood) mood, AVG(energy) energy FROM journal WHERE date > ? AND date <= ? GROUP BY date ORDER BY date")
-    .all(addDays(today, -14), today) as { date: string; mood: number | null; energy: number | null }[];
+export async function moodStats(today: string) {
+  const rows = await all<{ date: string; mood: number | null; energy: number | null }>(
+    "SELECT date, AVG(mood) mood, AVG(energy) energy FROM journal WHERE date > ? AND date <= ? GROUP BY date ORDER BY date",
+    [addDays(today, -14), today],
+  );
   const avg = (xs: (number | null)[]) => {
     const v = xs.filter((x): x is number => x != null);
     return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
@@ -80,19 +84,20 @@ export function moodStats(today: string) {
   };
 }
 
-export function learningStats(today: string) {
-  const minutes7 = (db.prepare("SELECT COALESCE(SUM(minutes),0) m FROM practice_logs WHERE date > ? AND date <= ?").get(addDays(today, -7), today) as { m: number }).m;
-  const active = db.prepare("SELECT * FROM learning WHERE status = 'active' ORDER BY id").all() as { id: number; title: string; kind: string; progress: number }[];
-  const lastPractice = db.prepare("SELECT MAX(date) d FROM practice_logs WHERE learning_id = ?");
+export async function learningStats(today: string) {
+  const minutes7 = (await get<{ m: number }>("SELECT COALESCE(SUM(minutes),0) m FROM practice_logs WHERE date > ? AND date <= ?", [addDays(today, -7), today]))!.m;
+  const active = await all<{ id: number; title: string; kind: string; progress: number }>("SELECT * FROM learning WHERE status = 'active' ORDER BY id");
+  const last = await all<{ learning_id: number; d: string }>("SELECT learning_id, MAX(date) d FROM practice_logs GROUP BY learning_id");
+  const lastByItem = new Map(last.map((r) => [r.learning_id, r.d]));
   const stale = active.filter((a) => {
-    const d = (lastPractice.get(a.id) as { d: string | null }).d;
+    const d = lastByItem.get(a.id);
     return !d || daysBetween(d, today) >= 3;
   });
   return { minutes7, active, stale };
 }
 
-export function focusMinutes(from: string, to: string) {
-  return (db.prepare("SELECT COALESCE(SUM(minutes),0) m FROM focus_sessions WHERE date >= ? AND date <= ?").get(from, to) as { m: number }).m;
+export async function focusMinutes(from: string, to: string) {
+  return (await get<{ m: number }>("SELECT COALESCE(SUM(minutes),0) m FROM focus_sessions WHERE date >= ? AND date <= ?", [from, to]))!.m;
 }
 
 function hashString(s: string) {
@@ -105,11 +110,11 @@ function hashString(s: string) {
  * Two challenges a day: one confidence/communication challenge and one from
  * another area. Difficulty unlocks as you complete more of them.
  */
-export function dailyChallenges(today: string): (Challenge & { done: boolean })[] {
-  const completed = (db.prepare("SELECT COUNT(*) n FROM challenge_logs").get() as { n: number }).n;
+export async function dailyChallenges(today: string): Promise<(Challenge & { done: boolean })[]> {
+  const completed = (await get<{ n: number }>("SELECT COUNT(*) n FROM challenge_logs"))!.n;
   const maxLevel = completed >= 20 ? 3 : completed >= 7 ? 2 : 1;
   const doneToday = new Set(
-    (db.prepare("SELECT challenge_key FROM challenge_logs WHERE date = ?").all(today) as { challenge_key: string }[]).map((r) => r.challenge_key),
+    (await all<{ challenge_key: string }>("SELECT challenge_key FROM challenge_logs WHERE date = ?", [today])).map((r) => r.challenge_key),
   );
   const seed = hashString(today);
   const pick = (pool: Challenge[], salt: number) => pool[(seed + salt) % pool.length];
@@ -122,8 +127,8 @@ export function dailyLesson(today: string) {
   return LESSONS[hashString(today + "lesson") % LESSONS.length];
 }
 
-export function challengeCount(from: string, to: string, area?: string) {
+export async function challengeCount(from: string, to: string, area?: string) {
   const keys = area ? CHALLENGES.filter((c) => c.area === area).map((c) => c.key) : null;
-  const rows = db.prepare("SELECT challenge_key FROM challenge_logs WHERE date >= ? AND date <= ?").all(from, to) as { challenge_key: string }[];
+  const rows = await all<{ challenge_key: string }>("SELECT challenge_key FROM challenge_logs WHERE date >= ? AND date <= ?", [from, to]);
   return rows.filter((r) => !keys || keys.includes(r.challenge_key)).length;
 }

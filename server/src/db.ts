@@ -1,16 +1,57 @@
-import Database from "better-sqlite3";
+import { createClient, type InArgs, type InStatement, type Transaction } from "@libsql/client";
 import fs from "node:fs";
 import path from "node:path";
 import { EXERCISE_LIBRARY } from "./guide/exercises.js";
 
-const dataDir = process.env.DATA_DIR ?? path.resolve("data");
-fs.mkdirSync(dataDir, { recursive: true });
+/**
+ * libSQL client: a local SQLite file by default, or a hosted Turso database
+ * when TURSO_DATABASE_URL is set (free hosts wipe local files on restart).
+ */
+function databaseUrl() {
+  if (process.env.TURSO_DATABASE_URL) return process.env.TURSO_DATABASE_URL;
+  if (process.env.REQUIRE_REMOTE_DB) {
+    throw new Error("TURSO_DATABASE_URL is not set. Refusing to start: data written to this host's disk would be lost on restart.");
+  }
+  const dataDir = process.env.DATA_DIR ?? path.resolve("data");
+  fs.mkdirSync(dataDir, { recursive: true });
+  return "file:" + path.join(dataDir, "ascend.db");
+}
 
-export const db = new Database(path.join(dataDir, "ascend.db"));
-db.pragma("journal_mode = WAL");
-db.pragma("foreign_keys = ON");
+export const db = createClient({ url: databaseUrl(), authToken: process.env.TURSO_AUTH_TOKEN });
 
-db.exec(`
+type Executor = Pick<Transaction, "execute">;
+export type Row = Record<string, unknown>;
+
+export async function all<T = Row>(sql: string, args: InArgs = [], ex: Executor = db): Promise<T[]> {
+  const rs = await ex.execute({ sql, args });
+  return rs.rows.map((r) => ({ ...r }) as T);
+}
+
+export async function get<T = Row>(sql: string, args: InArgs = [], ex: Executor = db): Promise<T | undefined> {
+  return (await all<T>(sql, args, ex))[0];
+}
+
+export async function run(sql: string, args: InArgs = [], ex: Executor = db) {
+  const rs = await ex.execute({ sql, args });
+  return { lastInsertRowid: Number(rs.lastInsertRowid ?? 0), changes: rs.rowsAffected };
+}
+
+/** Run `fn` inside a write transaction; rolls back if it throws. */
+export async function transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
+  const tx = await db.transaction("write");
+  try {
+    const result = await fn(tx);
+    await tx.commit();
+    return result;
+  } catch (err) {
+    await tx.rollback();
+    throw err;
+  } finally {
+    tx.close();
+  }
+}
+
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -155,25 +196,27 @@ CREATE INDEX IF NOT EXISTS idx_workouts_date ON workouts(date);
 CREATE INDEX IF NOT EXISTS idx_sets_workout ON workout_sets(workout_id);
 CREATE INDEX IF NOT EXISTS idx_meals_date ON meals(date);
 CREATE INDEX IF NOT EXISTS idx_journal_date ON journal(date);
-`);
+`;
 
-const insertExercise = db.prepare(
-  `INSERT OR IGNORE INTO exercises (name, muscle, equipment, category, instructions)
-   VALUES (@name, @muscle, @equipment, @category, @instructions)`,
-);
-db.transaction(() => {
-  for (const e of EXERCISE_LIBRARY) insertExercise.run(e);
-})();
+/** Create tables and seed the exercise library. Safe to run on every boot. */
+export async function initDb() {
+  await db.executeMultiple(SCHEMA);
+  const seed: InStatement[] = EXERCISE_LIBRARY.map((e) => ({
+    sql: `INSERT OR IGNORE INTO exercises (name, muscle, equipment, category, instructions)
+          VALUES (@name, @muscle, @equipment, @category, @instructions)`,
+    args: { ...e },
+  }));
+  await db.batch(seed, "write");
+}
 
-export function getKV<T>(key: string, fallback: T): T {
-  const row = db.prepare("SELECT value FROM kv WHERE key = ?").get(key) as
-    | { value: string }
-    | undefined;
+export async function getKV<T>(key: string, fallback: T): Promise<T> {
+  const row = await get<{ value: string }>("SELECT value FROM kv WHERE key = ?", [key]);
   return row ? (JSON.parse(row.value) as T) : fallback;
 }
 
-export function setKV(key: string, value: unknown) {
-  db.prepare(
+export async function setKV(key: string, value: unknown) {
+  await run(
     "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-  ).run(key, JSON.stringify(value));
+    [key, JSON.stringify(value)],
+  );
 }

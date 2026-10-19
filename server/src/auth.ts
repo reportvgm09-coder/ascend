@@ -8,19 +8,20 @@ import { getKV, setKV } from "./db.js";
 const COOKIE = "ascend_session";
 const isProd = process.env.NODE_ENV === "production";
 
-function jwtSecret(): string {
-  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
-  let secret = getKV<string | null>("jwt_secret", null);
+let secret = "";
+const jwtSecret = () => secret;
+
+/** Load (or create) the session secret, and apply APP_PASSWORD. Call once at startup. */
+export async function initAuth() {
+  secret = process.env.JWT_SECRET ?? (await getKV<string | null>("jwt_secret", null)) ?? "";
   if (!secret) {
     secret = crypto.randomBytes(32).toString("hex");
-    setKV("jwt_secret", secret);
+    await setKV("jwt_secret", secret);
   }
-  return secret;
-}
-
-// APP_PASSWORD (if set) always wins, so a deployed instance can never be claimed by a stranger.
-if (process.env.APP_PASSWORD) {
-  setKV("password_hash", bcrypt.hashSync(process.env.APP_PASSWORD, 10));
+  // APP_PASSWORD (if set) always wins, so a deployed instance can never be claimed by a stranger.
+  if (process.env.APP_PASSWORD) {
+    await setKV("password_hash", bcrypt.hashSync(process.env.APP_PASSWORD, 10));
+  }
 }
 
 const passwordHash = () => getKV<string | null>("password_hash", null);
@@ -60,31 +61,31 @@ const passwordSchema = z.object({ password: z.string().min(8, "Use at least 8 ch
 
 export const authRouter = Router();
 
-authRouter.get("/status", (req, res) => {
+authRouter.get("/status", async (req, res) => {
   let authed = false;
   try {
     jwt.verify(req.cookies?.[COOKIE] ?? "", jwtSecret());
     authed = true;
   } catch {}
   // In production without APP_PASSWORD, first-run setup is disabled for safety.
-  const canSetup = !passwordHash() && !isProd;
-  res.json({ authed, needsSetup: !passwordHash(), canSetup });
+  const hasPassword = Boolean(await passwordHash());
+  res.json({ authed, needsSetup: !hasPassword, canSetup: !hasPassword && !isProd });
 });
 
-authRouter.post("/setup", (req, res) => {
-  if (passwordHash()) return res.status(409).json({ error: "Already set up" });
+authRouter.post("/setup", async (req, res) => {
+  if (await passwordHash()) return res.status(409).json({ error: "Already set up" });
   if (isProd) return res.status(403).json({ error: "Set the APP_PASSWORD environment variable on your server." });
   const parsed = passwordSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0].message });
-  setKV("password_hash", bcrypt.hashSync(parsed.data.password, 10));
+  await setKV("password_hash", bcrypt.hashSync(parsed.data.password, 10));
   issue(res);
   res.json({ ok: true });
 });
 
-authRouter.post("/login", (req, res) => {
+authRouter.post("/login", async (req, res) => {
   const ip = req.ip ?? "unknown";
   if (tooMany(ip)) return res.status(429).json({ error: "Too many attempts. Try again in 15 minutes." });
-  const hash = passwordHash();
+  const hash = await passwordHash();
   const password = typeof req.body?.password === "string" ? req.body.password : "";
   if (!hash || !bcrypt.compareSync(password, hash)) {
     recordFailure(ip);
@@ -100,12 +101,12 @@ authRouter.post("/logout", (_req, res) => {
   res.json({ ok: true });
 });
 
-authRouter.post("/password", requireAuth, (req, res) => {
+authRouter.post("/password", requireAuth, async (req, res) => {
   if (process.env.APP_PASSWORD) return res.status(400).json({ error: "Password is managed by the APP_PASSWORD environment variable." });
-  const hash = passwordHash();
+  const hash = await passwordHash();
   if (!hash || !bcrypt.compareSync(String(req.body?.current ?? ""), hash)) return res.status(401).json({ error: "Current password is wrong" });
   const parsed = passwordSchema.safeParse({ password: req.body?.next });
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0].message });
-  setKV("password_hash", bcrypt.hashSync(parsed.data.password, 10));
+  await setKV("password_hash", bcrypt.hashSync(parsed.data.password, 10));
   res.json({ ok: true });
 });

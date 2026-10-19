@@ -12,6 +12,7 @@ RUN npm --prefix server run build && npm --prefix client run build \
 # ---- run
 FROM node:22-bookworm-slim
 ENV NODE_ENV=production PORT=8080 DATA_DIR=/data CLIENT_DIST=/app/client/dist
+# Set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN, or mount a persistent volume at /data.
 WORKDIR /app/server
 COPY --from=build /app/server/node_modules node_modules
 COPY --from=build /app/server/dist dist

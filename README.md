@@ -14,7 +14,7 @@ A personal growth app for workouts, nutrition, goals and habits, mindset, learni
 | **Learn** | Books, courses, skills, practice log, 32 growth challenges (confidence, discipline, mindset, knowledge), lessons | Nudges stale learning; challenge difficulty unlocks as you progress |
 | **Coach** | AI chat (Claude) that sees a snapshot of all your data | Personal plans, reviews, and answers. Optional, needs an API key |
 
-**Stack:** React + Vite + TypeScript + Tailwind (client) · Node + Express + SQLite (server) · single-user password login.
+**Stack:** React + Vite + TypeScript + Tailwind (client) · Node + Express + SQLite/libSQL (server; local file or Turso) · single-user password login.
 
 ## Run locally
 
@@ -27,50 +27,37 @@ npm run dev
 
 Open http://localhost:5173. On first visit you create your password, then fill in **Settings → Profile** so the guide can personalize everything.
 
-Your data lives in `server/data/ascend.db`. Use **Settings → Backup** to export or restore it.
+Locally your data lives in `server/data/ascend.db`. Use **Settings → Backup** to export or restore it.
 
-## Deploy online
+## Deploy online for free (Render + Turso)
 
-SQLite needs a **persistent disk**, so use a host that offers volumes. The included `Dockerfile` works anywhere.
+Render's free web service has no persistent disk, so your data lives in a free **Turso** database (hosted SQLite). Neither service needs a credit card for its free tier.
 
-Required environment variables:
+**Trade-off of the free tier:** the app sleeps after 15 minutes without visits, and the first visit after that takes about a minute to wake it up.
 
-| Variable | Purpose |
-|---|---|
-| `APP_PASSWORD` | Your login password. **Required in production.** Without it, nobody can log in, so a stranger can never claim your app. |
-| `ANTHROPIC_API_KEY` | Optional. Enables the AI coach. |
-| `JWT_SECRET` | Optional. A stable session secret (one is generated otherwise). |
+### 1. Create the database (Turso)
 
-### Fly.io (recommended: cheap, with volumes)
+1. Sign up at https://turso.tech (GitHub login works).
+2. Create a database named `ascend`, in the region closest to Singapore.
+3. On the database page, copy its **URL** (`libsql://ascend-<you>.turso.io`) and create a **token**. Keep both handy for step 2.
 
-**Automatic (GitHub Actions):** every push to `main` deploys via `.github/workflows/deploy.yml`.
-1. Create a Fly.io account, then create a deploy token: Fly dashboard → **Tokens** → create an org token (or run `fly tokens create org`).
-2. In your GitHub repo → **Settings → Secrets and variables → Actions**, add these secrets:
-   - `FLY_API_TOKEN`: the Fly token
-   - `APP_PASSWORD`: your login password
-   - `ANTHROPIC_API_KEY`: optional, enables the AI coach
-3. **Actions → Deploy to Fly.io → Run workflow.** The first run creates the app and a 1 GB volume, then deploys. Your app goes live at `https://ascend-<your-github-name>.fly.dev`.
+### 2. Create the web service (Render)
 
-Optional repository *variables*: `FLY_APP_NAME` (if the default name is taken) and `FLY_REGION` (default `sin`).
+1. Sign up at https://render.com with GitHub.
+2. **New → Blueprint**, pick this repository. Render reads `render.yaml`.
+3. Fill in the values it asks for:
+   - `APP_PASSWORD`: the password you'll log in with
+   - `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`: from step 1
+   - `ANTHROPIC_API_KEY`: optional, enables the AI coach (leave empty to skip)
+4. Click **Apply**. The first build takes a few minutes. Your app lives at `https://ascend-xxxx.onrender.com`.
 
-**Manual (Fly CLI):**
+Every push to `main` redeploys automatically. If the database settings are missing, the app refuses to start rather than saving data that would be wiped.
 
-```bash
-fly launch --no-deploy          # accept the existing fly.toml, pick a unique app name
-fly volumes create ascend_data --size 1
-fly secrets set APP_PASSWORD='your-strong-password' ANTHROPIC_API_KEY='sk-ant-...'
-fly deploy
-```
+### Other hosts
 
-### Render
+The `Dockerfile` runs anywhere. Set `APP_PASSWORD`, and either set the Turso variables or mount a persistent volume at `/data`.
 
-Push this repo to GitHub → **New → Blueprint** → choose the repo (uses `render.yaml`). Set `APP_PASSWORD` and `ANTHROPIC_API_KEY` when prompted. Disks require a paid instance.
-
-### Railway
-
-New project → Deploy from GitHub repo (it detects the Dockerfile) → add a **Volume** mounted at `/data` → set the variables above.
-
-On your phone, open the deployed URL and use "Add to Home Screen" for an app-like experience.
+On your phone, open the app URL and use "Add to Home Screen" for an app-like experience.
 
 ## Project layout
 
@@ -80,7 +67,7 @@ server/src/
   auth.ts         password login, JWT cookie, brute-force protection
   api.ts          REST API (generic CRUD + workouts, habits, guide, backup)
   coach.ts        AI coach (Claude, streaming)
-  db.ts           SQLite schema
+  db.ts           database client (local SQLite file or Turso) + schema
   guide/          rule-based coaching engine
     briefing.ts   daily recommendations, scores, weekly review
     training.ts   programs, progressive overload, muscle balance

@@ -4,9 +4,9 @@ import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { api } from "./api.js";
-import { authRouter, requireAuth } from "./auth.js";
+import { authRouter, initAuth, requireAuth } from "./auth.js";
 import { coachRouter } from "./coach.js";
-import "./db.js";
+import { initDb } from "./db.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -29,6 +29,9 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   console.error(err);
   res.status(500).json({ error: "Something went wrong on the server." });
 });
+
+await initDb();
+await initAuth();
 
 const port = Number(process.env.PORT ?? 3001);
 app.listen(port, () => console.log(`Ascend server listening on http://localhost:${port}`));
