@@ -1,0 +1,18 @@
+# Render Blueprint. Persistent disks require a paid instance (Starter or above).
+services:
+  - type: web
+    name: ascend
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_PASSWORD
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+    disk:
+      name: ascend-data
+      mountPath: /data
+      sizeGB: 1
